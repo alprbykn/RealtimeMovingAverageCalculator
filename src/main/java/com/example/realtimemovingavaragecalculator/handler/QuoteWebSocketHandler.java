@@ -14,6 +14,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -22,8 +23,8 @@ public class QuoteWebSocketHandler extends TextWebSocketHandler {
 
     private final Integer windowSize;
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private MovingAverageCalculator calculator;
-    private ExecutorService executorService;
+    private final Map<WebSocketSession, ExecutorService> sessionExecutors = new ConcurrentHashMap<>();
+    private final Map<WebSocketSession, MovingAverageCalculator> sessionCalculators = new ConcurrentHashMap<>();
 
     @Autowired
     public QuoteWebSocketHandler(AppConfig appConfig) {
@@ -32,17 +33,24 @@ public class QuoteWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
-        calculator = new MovingAverageCalculator(windowSize);
-        executorService = Executors.newSingleThreadExecutor();
+        MovingAverageCalculator calculator = new MovingAverageCalculator(windowSize);
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
         executorService.submit(calculator);
+
+        sessionCalculators.put(session, calculator);
+        sessionExecutors.put(session, executorService);
+
         System.out.println("Connection established: " + session.getId());
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
+        ExecutorService executorService = sessionExecutors.remove(session);
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
         }
+        sessionCalculators.remove(session);
+
         System.out.println("Connection closed: " + session.getId());
         super.afterConnectionClosed(session, status);
     }
@@ -50,7 +58,8 @@ public class QuoteWebSocketHandler extends TextWebSocketHandler {
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         try {
-            Quote quote = new Quote(objectMapper.readValue(message.getPayload(), Quote.class).getPrice(),System.currentTimeMillis());
+            Quote quote = new Quote(objectMapper.readValue(message.getPayload(), Quote.class).getPrice(), System.currentTimeMillis());
+            MovingAverageCalculator calculator = sessionCalculators.get(session);
             calculator.addPrice(quote);
             double average = calculator.getAverage();
             List<Double> prices = calculator.getPrices();
